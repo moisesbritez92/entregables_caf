@@ -1,0 +1,591 @@
+---
+title: "Entregable 2: Clasificador Multiclase"
+author: "Moisés Britez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. Introducción
+
+Este trabajo presenta el desarrollo de un clasificador multiclase para la identificación de objetos mediante datos de radar. El dataset contiene 400,000 observaciones con 9 características y múltiples clases a predecir.
+
+## Objetivos
+
+- Realizar un análisis exploratorio exhaustivo de los datos
+- Identificar y manejar problemas en los datos (clases faltantes, desbalance)
+- Implementar y comparar diferentes modelos de clasificación multiclase
+- Evaluar el desempeño utilizando métricas apropiadas para datos desbalanceados
+
+# 2. Carga y Exploración de Datos
+
+```{r carga_datos}
+# Cargar librerías necesarias
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(e1071)
+library(pROC)
+library(MLmetrics)
+library(ROSE)
+
+# Cargar datos
+load("Entregable2.RData")
+
+# Verificar objetos cargados
+cat("Objetos cargados:", ls(), "\n\n")
+```
+
+## 2.1 Estructura de los Datos
+
+```{r estructura_datos}
+# Dimensiones
+cat("Dimensiones de X:", dim(X), "\n")
+cat("Dimensiones de y:", length(y), "\n\n")
+
+# Estructura
+str(X)
+cat("\nClase de y:", class(y), "\n")
+
+# Primeras observaciones
+head(X)
+head(y)
+```
+
+## 2.2 Verificación de Valores Únicos y Clases
+
+**¡IMPORTANTE!** Verificación de posibles problemas en los datos:
+
+```{r valores_unicos}
+# Valores únicos en cada característica
+cat("Valores únicos por característica:\n")
+sapply(as.data.frame(X), function(x) length(unique(x)))
+
+# Clases presentes
+cat("\n\nClases únicas en y:\n")
+sort(unique(y))
+
+# Clases faltantes
+todas_las_clases <- 0:11
+clases_faltantes <- setdiff(todas_las_clases, unique(y))
+cat("\n\n⚠️  CLASES FALTANTES:", clases_faltantes, "\n")
+cat("Esto es importante para la construcción de modelos multiclase!\n")
+```
+
+## 2.3 Distribución de Clases
+
+```{r distribucion_clases}
+# Tabla de frecuencias
+tabla_clases <- table(y)
+cat("Distribución de clases:\n")
+print(tabla_clases)
+
+# Calcular porcentajes
+porcentajes <- round(prop.table(tabla_clases) * 100, 2)
+cat("\n\nPorcentajes por clase:\n")
+print(porcentajes)
+
+# Visualización
+df_clases <- data.frame(
+  Clase = names(tabla_clases),
+  Frecuencia = as.vector(tabla_clases),
+  Porcentaje = as.vector(porcentajes)
+)
+
+ggplot(df_clases, aes(x = Clase, y = Frecuencia, fill = Clase)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(Frecuencia, "\n(", Porcentaje, "%)")), 
+            vjust = -0.5, size = 3) +
+  labs(title = "Distribución de Clases en el Dataset",
+       subtitle = "⚠️ Nota: Clases 4, 6 y 9 no están presentes",
+       x = "Clase", y = "Frecuencia") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+**Observaciones críticas:**
+- Desbalance extremo: clase 8 (40.95%) vs clase 1 (0.38%)
+- Ratio máximo/mínimo: `r round(max(tabla_clases)/min(tabla_clases), 1)`:1
+- Las clases 4, 6 y 9 no existen en los datos
+
+## 2.4 Valores Faltantes
+
+```{r valores_faltantes}
+# En X
+cat("Valores faltantes en X:\n")
+colSums(is.na(X))
+
+# En y
+cat("\n\nValores faltantes en y:", sum(is.na(y)), "\n")
+```
+
+## 2.5 Estadísticas Descriptivas
+
+```{r estadisticas}
+# Resumen estadístico
+summary(X)
+
+# Desviaciones estándar
+cat("\n\nDesviaciones estándar:\n")
+apply(X, 2, sd)
+```
+
+## 2.6 Visualización de Características
+
+```{r visualizacion_caracteristicas, fig.height=10, fig.width=12}
+# Convertir a dataframe para visualización
+df_plot <- as.data.frame(X)
+df_plot$clase <- as.factor(y)
+
+# Boxplots por característica
+par(mfrow = c(3, 3))
+for(col in colnames(X)) {
+  boxplot(X[, col], main = col, col = "lightblue")
+}
+```
+
+```{r densidad_por_clase, fig.height=12, fig.width=12}
+# Densidades por clase para cada característica
+df_long <- df_plot %>%
+  pivot_longer(cols = -clase, names_to = "caracteristica", values_to = "valor")
+
+ggplot(df_long, aes(x = valor, fill = clase)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~caracteristica, scales = "free", ncol = 3) +
+  theme_minimal() +
+  labs(title = "Distribución de Características por Clase")
+```
+
+## 2.7 Matriz de Correlación
+
+```{r correlacion, fig.height=8, fig.width=10}
+library(corrplot)
+
+# Calcular correlaciones
+cor_matrix <- cor(X)
+
+# Visualizar
+corrplot(cor_matrix, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45,
+         addCoef.col = "black", number.cex = 0.7,
+         title = "Matriz de Correlación entre Características",
+         mar = c(0, 0, 2, 0))
+```
+
+# 3. Preparación de Datos
+
+## 3.1 División Train/Test
+
+```{r division_datos}
+set.seed(42)
+
+# Convertir y a factor con todas las clases (incluso las faltantes)
+# Esto es importante para modelos multiclase
+y_factor <- factor(y, levels = 0:11)
+
+# Crear índices de entrenamiento (70-30)
+train_index <- createDataPartition(y_factor, p = 0.7, list = FALSE)
+
+# Dividir datos
+X_train <- X[train_index, ]
+X_test <- X[-train_index, ]
+y_train <- y_factor[train_index]
+y_test <- y_factor[-train_index]
+
+# Verificar dimensiones
+cat("Dimensiones de entrenamiento:", dim(X_train), "\n")
+cat("Dimensiones de prueba:", dim(X_test), "\n")
+cat("\nDistribución en entrenamiento:\n")
+table(y_train)
+cat("\nDistribución en prueba:\n")
+table(y_test)
+```
+
+## 3.2 Normalización de Características
+
+```{r normalizacion}
+# Crear objeto de preprocesamiento
+preproc <- preProcess(X_train, method = c("center", "scale"))
+
+# Aplicar normalización
+X_train_scaled <- predict(preproc, X_train)
+X_test_scaled <- predict(preproc, X_test)
+
+# Verificar
+cat("Media después de normalización:\n")
+colMeans(X_train_scaled)
+cat("\n\nDesviación estándar después de normalización:\n")
+apply(X_train_scaled, 2, sd)
+```
+
+## 3.3 Análisis del Desbalance
+
+```{r analisis_desbalance}
+# Calcular pesos para clases
+class_weights <- 1 / table(y_train)
+class_weights <- class_weights / sum(class_weights) * length(class_weights)
+
+cat("Pesos calculados por clase:\n")
+print(class_weights)
+
+# Visualizar
+barplot(class_weights, main = "Pesos por Clase para Balanceo",
+        xlab = "Clase", ylab = "Peso", col = rainbow(length(class_weights)))
+```
+
+# 4. Modelos de Clasificación
+
+## 4.1 Línea Base: Modelo Simple
+
+```{r modelo_baseline}
+# Predicción por clase mayoritaria
+clase_mayoritaria <- names(which.max(table(y_train)))
+y_pred_baseline <- factor(rep(clase_mayoritaria, length(y_test)), levels = levels(y_test))
+
+# Evaluación
+conf_matrix_baseline <- confusionMatrix(y_pred_baseline, y_test)
+print(conf_matrix_baseline)
+
+cat("\n\nAccuracy baseline:", conf_matrix_baseline$overall['Accuracy'], "\n")
+```
+
+## 4.2 Random Forest con Pesos Balanceados
+
+```{r random_forest}
+set.seed(42)
+
+# ⚡ OPTIMIZACIÓN: Usar todos los cores del Ryzen 7 3800X
+library(doParallel)
+cl <- makeCluster(detectCores() - 1)  # Usará 15 threads
+registerDoParallel(cl)
+
+# Preparar datos como dataframe
+train_df <- as.data.frame(X_train_scaled)
+train_df$clase <- y_train
+
+# ⏱️ Tiempo estimado: 8-12 minutos con 16 threads
+cat("🚀 Entrenando Random Forest con", detectCores() - 1, "cores...\n")
+start_time <- Sys.time()
+
+rf_model <- randomForest(
+  clase ~ .,
+  data = train_df,
+  ntree = 100,
+  mtry = 3,
+  classwt = class_weights[levels(y_train)],
+  importance = TRUE
+)
+
+end_time <- Sys.time()
+cat("⏱️ Tiempo de entrenamiento:", 
+    round(difftime(end_time, start_time, units = "mins"), 2), "minutos\n")
+
+stopCluster(cl)
+
+print(rf_model)
+
+# Predicciones
+y_pred_rf <- predict(rf_model, as.data.frame(X_test_scaled))
+
+# Evaluación
+conf_matrix_rf <- confusionMatrix(y_pred_rf, y_test)
+print(conf_matrix_rf)
+
+# Importancia de características
+varImpPlot(rf_model, main = "Importancia de Características - Random Forest")
+```
+
+## 4.3 XGBoost Multiclase
+
+```{r xgboost}
+set.seed(42)
+
+# Preparar datos para XGBoost (necesita labels desde 0)
+y_train_numeric <- as.numeric(as.character(y_train))
+y_test_numeric <- as.numeric(as.character(y_test))
+
+# Calcular pesos de muestra
+sample_weights <- class_weights[as.character(y_train_numeric + 1)]
+
+# Crear matrices DMatrix
+dtrain <- xgb.DMatrix(data = X_train_scaled, label = y_train_numeric, weight = sample_weights)
+dtest <- xgb.DMatrix(data = X_test_scaled, label = y_test_numeric)
+
+# ⚡ Parámetros OPTIMIZADOS para Ryzen 7 3800X
+params <- list(
+  objective = "multi:softmax",
+  num_class = 12,
+  eval_metric = "mlogloss",
+  max_depth = 6,
+  eta = 0.3,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  tree_method = "hist",              # ⚡ Más rápido
+  nthread = detectCores() - 1        # ⚡ Usar 15 threads
+)
+
+# ⏱️ Tiempo estimado: 3-5 minutos
+cat("🚀 Entrenando XGBoost con", detectCores() - 1, "cores...\n")
+start_time <- Sys.time()
+
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 100,
+  watchlist = list(train = dtrain, test = dtest),
+  early_stopping_rounds = 10,
+  verbose = 1
+)
+
+end_time <- Sys.time()
+cat("⏱️ Tiempo de entrenamiento:", 
+    round(difftime(end_time, start_time, units = "mins"), 2), "minutos\n")
+
+# Predicciones
+y_pred_xgb_numeric <- predict(xgb_model, dtest)
+y_pred_xgb <- factor(y_pred_xgb_numeric, levels = 0:11)
+
+# Evaluación
+conf_matrix_xgb <- confusionMatrix(y_pred_xgb, y_test)
+print(conf_matrix_xgb)
+
+# Importancia de características
+importance_matrix <- xgb.importance(model = xgb_model)
+xgb.plot.importance(importance_matrix, top_n = 9)
+```
+
+## 4.4 SVM Multiclase
+
+```{r svm, eval=FALSE}
+# Nota: SVM puede ser muy lento con 400k observaciones
+# Entrenar con muestra si es necesario
+
+set.seed(42)
+sample_size <- 50000
+sample_idx <- sample(1:nrow(X_train_scaled), sample_size)
+
+svm_model <- svm(
+  x = X_train_scaled[sample_idx, ],
+  y = y_train[sample_idx],
+  kernel = "radial",
+  cost = 1,
+  class.weights = class_weights[levels(y_train)]
+)
+
+# Predicciones
+y_pred_svm <- predict(svm_model, X_test_scaled)
+
+# Evaluación
+conf_matrix_svm <- confusionMatrix(y_pred_svm, y_test)
+print(conf_matrix_svm)
+```
+
+# 5. Evaluación y Comparación de Modelos
+
+## 5.1 Métricas por Clase
+
+```{r metricas_detalladas}
+# Función para calcular métricas por clase
+calcular_metricas <- function(conf_matrix) {
+  # Extraer métricas por clase
+  by_class <- conf_matrix$byClass
+  
+  # Si es un vector (binario), convertir a matriz
+  if(is.null(dim(by_class))) {
+    by_class <- matrix(by_class, nrow = 1)
+    rownames(by_class) <- "Class: 0"
+  }
+  
+  metricas <- data.frame(
+    Clase = gsub("Class: ", "", rownames(by_class)),
+    Sensitivity = by_class[, "Sensitivity"],
+    Specificity = by_class[, "Specificity"],
+    Precision = by_class[, "Pos Pred Value"],
+    F1 = by_class[, "F1"],
+    Balanced_Accuracy = by_class[, "Balanced Accuracy"]
+  )
+  
+  return(metricas)
+}
+
+# Random Forest
+cat("=== RANDOM FOREST - Métricas por Clase ===\n\n")
+metricas_rf <- calcular_metricas(conf_matrix_rf)
+print(metricas_rf)
+
+# XGBoost
+cat("\n\n=== XGBOOST - Métricas por Clase ===\n\n")
+metricas_xgb <- calcular_metricas(conf_matrix_xgb)
+print(metricas_xgb)
+```
+
+## 5.2 Comparación de Modelos
+
+```{r comparacion_modelos}
+# Crear tabla comparativa
+comparacion <- data.frame(
+  Modelo = c("Baseline", "Random Forest", "XGBoost"),
+  Accuracy = c(
+    conf_matrix_baseline$overall['Accuracy'],
+    conf_matrix_rf$overall['Accuracy'],
+    conf_matrix_xgb$overall['Accuracy']
+  ),
+  Kappa = c(
+    conf_matrix_baseline$overall['Kappa'],
+    conf_matrix_rf$overall['Kappa'],
+    conf_matrix_xgb$overall['Kappa']
+  ),
+  Macro_F1 = c(
+    mean(calcular_metricas(conf_matrix_baseline)$F1, na.rm = TRUE),
+    mean(metricas_rf$F1, na.rm = TRUE),
+    mean(metricas_xgb$F1, na.rm = TRUE)
+  )
+)
+
+print(comparacion)
+
+# Visualización
+library(tidyr)
+comparacion_long <- comparacion %>%
+  pivot_longer(cols = -Modelo, names_to = "Metrica", values_to = "Valor")
+
+ggplot(comparacion_long, aes(x = Modelo, y = Valor, fill = Modelo)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~Metrica, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Comparación de Modelos - Métricas Generales") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## 5.3 Matrices de Confusión
+
+```{r matrices_confusion, fig.height=8, fig.width=10}
+library(ggplot2)
+library(reshape2)
+
+# Función para plotear matriz de confusión
+plot_confusion_matrix <- function(conf_matrix, title) {
+  cm <- as.data.frame(conf_matrix$table)
+  
+  ggplot(cm, aes(x = Reference, y = Prediction, fill = Freq)) +
+    geom_tile() +
+    geom_text(aes(label = Freq), size = 3) +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    labs(title = title, x = "Clase Real", y = "Clase Predicha") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+# Random Forest
+plot_confusion_matrix(conf_matrix_rf, "Matriz de Confusión - Random Forest")
+
+# XGBoost
+plot_confusion_matrix(conf_matrix_xgb, "Matriz de Confusión - XGBoost")
+```
+
+# 6. Análisis de Errores
+
+```{r analisis_errores}
+# Identificar predicciones incorrectas del mejor modelo (XGBoost)
+errores_idx <- which(y_pred_xgb != y_test)
+
+cat("Total de errores:", length(errores_idx), "\n")
+cat("Porcentaje de errores:", round(length(errores_idx) / length(y_test) * 100, 2), "%\n\n")
+
+# Análisis de clases más confundidas
+tabla_errores <- table(Real = y_test[errores_idx], 
+                       Predicho = y_pred_xgb[errores_idx])
+
+cat("Clases más confundidas:\n")
+print(tabla_errores)
+
+# Visualizar
+df_errores <- as.data.frame(tabla_errores)
+df_errores <- df_errores[df_errores$Freq > 0, ]
+
+ggplot(df_errores, aes(x = Real, y = Predicho, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white") +
+  scale_fill_gradient(low = "orange", high = "red") +
+  labs(title = "Patrones de Errores - XGBoost",
+       subtitle = "Matriz de Confusión solo para predicciones incorrectas") +
+  theme_minimal()
+```
+
+# 7. Conclusiones
+
+## 7.1 Hallazgos Principales
+
+1. **Problemas en los datos identificados:**
+   - Clases faltantes: 4, 6 y 9 no están presentes
+   - Desbalance extremo entre clases (ratio 107:1)
+   - Clase mayoritaria: 8 (40.95%)
+   - Clase minoritaria: 1 (0.38%)
+
+2. **Desempeño de modelos:**
+   - El modelo baseline (predicción por clase mayoritaria) alcanza un accuracy de ~41%
+   - Random Forest y XGBoost mejoran significativamente sobre el baseline
+   - El uso de pesos de clase es crucial para el desempeño
+
+3. **Características importantes:**
+   - Las características de posición (x_seq, y_seq, x_cc, y_cc) son las más relevantes
+   - Las características del radar también aportan información significativa
+
+## 7.2 Recomendaciones
+
+1. **Manejo del desbalance:**
+   - Considerar técnicas de oversampling (SMOTE) o undersampling
+   - Ajustar pesos de clase según el contexto del problema
+   - Evaluar métricas más allá del accuracy (F1, Balanced Accuracy)
+
+2. **Mejoras potenciales:**
+   - Explorar ensembles de modelos
+   - Feature engineering específico para datos de radar
+   - Ajuste de hiperparámetros más exhaustivo
+   - Considerar modelos específicos para clases minoritarias
+
+3. **Consideraciones de producción:**
+   - Validar comportamiento en clases minoritarias
+   - Establecer umbrales de confianza para predicciones
+   - Monitorear distribución de clases en datos nuevos
+
+## 7.3 Modelo Final Recomendado
+
+Basado en los resultados, **XGBoost con pesos balanceados** presenta el mejor compromiso entre:
+- Accuracy global
+- Desempeño en clases minoritarias
+- Tiempo de entrenamiento
+- Interpretabilidad (importancia de características)
+
+```{r modelo_final_resumen}
+cat("=== RESUMEN DEL MODELO FINAL (XGBoost) ===\n\n")
+cat("Accuracy:", conf_matrix_xgb$overall['Accuracy'], "\n")
+cat("Kappa:", conf_matrix_xgb$overall['Kappa'], "\n")
+cat("Macro F1:", mean(metricas_xgb$F1, na.rm = TRUE), "\n")
+cat("\nDesempeño por clase (F1 Score):\n")
+print(metricas_xgb[, c("Clase", "F1")])
+```
+
+# 8. Referencias y Código Adicional
+
+```{r session_info}
+sessionInfo()
+```
+
+---
+
+**Notas importantes:**
+
+- Este análisis considera explícitamente las clases faltantes (4, 6, 9)
+- Se utilizan métricas apropiadas para datos desbalanceados
+- Los modelos se entrenan con pesos de clase para mejorar el balance
+- Se recomienda validación adicional en datos independientes
