@@ -1,0 +1,494 @@
+---
+title: "Entregable 1: Modelización del consumo en el equipo de auxiliares"
+author: "Moises Britez"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+---
+
+## Planteamiento y flujo de trabajo
+
+En este documento se cubren los siete apartados solicitados en el enunciado. La estructura general es:
+
+1. Carga y revisión de los datos (`Entregable1.RData`).
+2. Limpieza y filtrado de eventos.
+3. Comparativa de consumos y potencias por tipo de evento.
+4. Modelización lineal con la primera quincena de septiembre.
+5. Diagnóstico del modelo y análisis de significancia.
+6. Validación con la segunda quincena.
+7. Generación de un modelo predictivo más complejo y selección del modelo final.
+
+### Resumen ejecutivo
+
+**Objetivo**: Modelizar el consumo energético de los equipos auxiliares de trenes en función de variables operativas y de climatización.
+
+**Datos**: Eventos registrados durante septiembre de 2019, con información sobre duración, tipo de evento, consumo energético y variables de compresores y calefacción.
+
+**Metodología**:
+- Limpieza y filtrado de datos (eventos válidos con duración ≤ 600 segundos)
+- Análisis exploratorio y pruebas de hipótesis (t-test)
+- Modelización lineal múltiple (interpretable)
+- Modelización con Random Forest (mayor capacidad predictiva)
+- Validación temporal (primera quincena para entrenamiento, segunda para validación)
+
+**Resultados esperados**:
+- Identificación de variables significativas que impactan el consumo
+- Comparación de modelos según precisión (RMSE) e interpretabilidad
+- Recomendación del modelo más apropiado para despliegue
+
+## 1. Configuración e importación de datos
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 7, fig.height = 4.5)
+```
+
+```{r libraries}
+required_packages <- c(
+  "tidyverse", "lubridate", "broom", "glue", "gt", "scales", "yardstick", "randomForest"
+)
+
+missing_pkgs <- setdiff(required_packages, rownames(installed.packages()))
+if (length(missing_pkgs) > 0) {
+  stop(glue::glue("Instala los paquetes antes de continuar: {paste(missing_pkgs, collapse = ', ')}"))
+}
+
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+rmse <- function(obs, pred) {
+  sqrt(mean((obs - pred)^2, na.rm = TRUE))
+}
+```
+
+```{r load-data}
+data_path <- "Entregable1.RData"
+stopifnot(file.exists(data_path))
+
+data_env <- new.env()
+load(data_path, envir = data_env)
+
+if ("df" %in% ls(data_env)) {
+  df_raw <- data_env$df
+} else {
+  fallback_name <- ls(data_env)[1]
+  warning(glue::glue("No se encontró 'df'; se usará '{fallback_name}' como fuente"))
+  df_raw <- data_env[[fallback_name]]
+}
+
+rm(data_env)
+```
+
+```{r glimpse-raw}
+df_raw %>% 
+  as_tibble() %>% 
+  glimpse(width = 80)
+```
+
+### Diccionario de variables
+
+| Variable | Descripción | Unidad |
+|----------|-------------|--------|
+| `date_time` | Fecha y hora del evento | Timestamp |
+| `event` | Tipo de evento (interstation, stop, maintenance, etc.) | Categórica |
+| `ut` | Identificador de la unidad de tren | Categórica |
+| `event_duration` | Duración del evento | Segundos |
+| `suma_ton_compresores` | Suma de toneladas de refrigeración de compresores | Toneladas |
+| `suma_hvac_ton_compresores` | Suma de toneladas HVAC de compresores | Toneladas |
+| `suma_hvac_ton_heater` | Suma de toneladas HVAC de calefacción | Toneladas |
+| `suma_ton_comp_cab` | Suma de toneladas de compresores en cabina | Toneladas |
+| `suma_ton_heater_cab` | Suma de toneladas de calefacción en cabina | Toneladas |
+| `eaux_train_ac` | Consumo energético de equipos auxiliares | kWh |
+| `potencia_kw` | Potencia media durante el evento (calculada) | kW |
+
+## 2. Limpieza y filtrado de eventos
+
+Se aplican los siguientes criterios de filtrado:
+
+- **Duración máxima**: Eventos con duración ≤ 600 segundos (10 minutos)
+- **Exclusión de mantenimiento**: Se excluyen eventos tipo "maintenance" por su naturaleza atípica
+- **Valores válidos**: Se eliminan registros con valores faltantes en consumo o potencia
+- **Cálculo de potencia**: Se calcula la potencia media (kW) = Energía (kWh) / Duración (horas)
+
+```{r clean-filter}
+numeric_cols <- c(
+  "event_duration", "suma_ton_compresores", "suma_hvac_ton_compresores",
+  "suma_hvac_ton_heater", "suma_ton_comp_cab", "suma_ton_heater_cab", "eaux_train_ac"
+)
+
+df_filtered <- df_raw %>%
+  as_tibble() %>%
+  mutate(across(all_of(numeric_cols), as.numeric)) %>%
+  mutate(
+    date_time = lubridate::ymd_hms(date_time, tz = "UTC"),
+    event = forcats::as_factor(event),
+    ut = forcats::as_factor(ut),
+    potencia_kw = if_else(event_duration > 0, eaux_train_ac / (event_duration / 3600), NA_real_)
+  ) %>%
+  filter(event_duration <= 600, event != "maintenance", event_duration > 0) %>%
+  drop_na(eaux_train_ac, potencia_kw)
+
+df_filtered %>%
+  summarise(
+    eventos = n(),
+    consumos_kWh = sum(eaux_train_ac, na.rm = TRUE),
+    duracion_total_h = sum(event_duration, na.rm = TRUE) / 3600
+  ) %>%
+  gt::gt()
+```
+
+```{r eventos-por-tipo, fig.cap="Distribución de eventos tras el filtrado"}
+df_filtered %>%
+  count(event, sort = TRUE) %>%
+  mutate(frac = n / sum(n)) %>%
+  ggplot(aes(x = event, y = n, fill = event)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = scales::percent(frac, accuracy = 0.1)), vjust = -0.5) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = "Tipo de evento", y = "Número de eventos")
+```
+
+## 3. Comparativa de consumos y potencias
+
+
+```{r comparativa}
+df_events <- df_filtered %>%
+  filter(event %in% c("interstation", "stop")) %>%
+  mutate(event = forcats::fct_drop(event))
+
+comparativa_eventos <- df_events %>%
+  group_by(event) %>%
+  summarise(
+    n = n(),
+    consumo_medio_kWh = mean(eaux_train_ac),
+    potencia_media_kW = mean(potencia_kw),
+    .groups = "drop"
+  )
+
+tt_consumo <- t.test(eaux_train_ac ~ event, data = df_events, var.equal = FALSE)
+tt_potencia <- t.test(potencia_kw ~ event, data = df_events, var.equal = FALSE)
+
+comparativa_eventos %>% gt::gt()
+```
+
+```{r ttest-tables, echo=FALSE}
+bind_rows(
+  broom::tidy(tt_consumo, conf.int = TRUE) %>% mutate(metrica = "Consumo (kWh)"),
+  broom::tidy(tt_potencia, conf.int = TRUE) %>% mutate(metrica = "Potencia (kW)")
+) %>%
+  rename(conf_low = conf.low, conf_high = conf.high) %>%
+  transmute(
+    metrica,
+    estimate1,
+    estimate2,
+    estimate = estimate,
+    statistic,
+    p_value = p.value,
+    conf_low,
+    conf_high
+  ) %>%
+  gt::gt() %>%
+  gt::fmt_number(columns = -metrica, decimals = 3)
+```
+
+### Interpretación de las pruebas t de Student
+
+Las pruebas t de Welch (dos muestras independientes con varianzas desiguales) muestran:
+
+**Consumo de energía (kWh):**
+- Los eventos tipo "interstation" presentan un consumo medio significativamente diferente al de los eventos "stop".
+- El p-valor indica si existe evidencia estadística suficiente para rechazar la hipótesis nula de igualdad de medias.
+- El intervalo de confianza proporciona un rango estimado para la diferencia entre las medias poblacionales.
+
+**Potencia media (kW):**
+- Similar interpretación para la potencia: se evalúa si existe diferencia significativa en la potencia media entre ambos tipos de eventos.
+- Un p-valor < 0.05 indicaría diferencias estadísticamente significativas al nivel de confianza del 95%.
+
+## 4. Modelo lineal con la primera quincena
+
+```{r split-data}
+train_data <- df_filtered %>%
+  filter(date(date_time) <= as.Date("2019-09-15"))
+
+validation_data <- df_filtered %>%
+  filter(date(date_time) > as.Date("2019-09-15"))
+
+model_formula <- eaux_train_ac ~ event + event_duration + suma_ton_compresores +
+  suma_hvac_ton_compresores + suma_hvac_ton_heater + suma_ton_comp_cab + suma_ton_heater_cab
+
+lm_model <- lm(model_formula, data = train_data)
+
+summary(lm_model)
+```
+
+## 5. Diagnóstico del modelo lineal
+
+```{r lm-tidy}
+lm_tidy <- broom::tidy(lm_model, conf.int = TRUE)
+median_hours <- median(train_data$event_duration, na.rm = TRUE) / 3600
+
+lm_tidy <- lm_tidy %>%
+  mutate(kw_equiv = estimate / median_hours)
+
+lm_tidy %>%
+  mutate(across(c(estimate, std.error, conf.low, conf.high, kw_equiv), round, 3)) %>%
+  gt::gt()
+```
+
+```{r lm-residuals}
+lm_train_aug <- broom::augment(lm_model, data = train_data)
+
+ggplot(lm_train_aug, aes(x = .resid)) +
+  geom_histogram(bins = 30, color = "white", fill = "steelblue") +
+  labs(x = "Residuo (kWh)", y = "Frecuencia", title = "Distribución de residuos del modelo lineal")
+```
+
+```{r qq-plot}
+ggplot(lm_train_aug, aes(sample = .resid)) +
+  stat_qq() +
+  stat_qq_line(color = "red", linetype = "dashed") +
+  labs(x = "Cuantiles teóricos", y = "Cuantiles muestrales", 
+       title = "Q-Q Plot: Normalidad de residuos")
+```
+
+```{r residuals-vs-fitted}
+ggplot(lm_train_aug, aes(x = .fitted, y = .resid)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "firebrick") +
+  labs(x = "Valores ajustados (kWh)", y = "Residuo (kWh)", title = "Residuos vs valores ajustados")
+```
+
+```{r lm-significance}
+significant_terms <- lm_tidy %>%
+  filter(term != "(Intercept)", p.value < 0.05) %>%
+  pull(term)
+
+significant_terms
+```
+
+### Interpretación de la significancia estadística
+
+Las variables con p-valor < 0.05 son estadísticamente significativas al nivel de confianza del 95%. Esto significa que tienen un efecto real sobre el consumo de energía de los equipos auxiliares, más allá del azar aleatorio.
+
+Los coeficientes estimados indican:
+- **Signo positivo**: A mayor valor de la variable predictora, mayor consumo energético
+- **Signo negativo**: A mayor valor de la variable predictora, menor consumo energético
+- **Magnitud**: El impacto cuantitativo de cada unidad adicional de la variable sobre el consumo (kWh)
+
+## 6. Validación con la segunda quincena
+
+```{r lm-rmse}
+lm_val_aug <- broom::augment(lm_model, newdata = validation_data)
+
+lm_rmse_tbl <- tibble(
+  dataset = c("Entrenamiento (1-15 Sep)", "Validación (16-30 Sep)"),
+  rmse = c(rmse(lm_train_aug$eaux_train_ac, lm_train_aug$.fitted),
+           rmse(lm_val_aug$eaux_train_ac, lm_val_aug$.fitted))
+)
+
+lm_rmse_tbl %>%
+  mutate(rmse = round(rmse, 3)) %>%
+  gt::gt()
+```
+
+```{r lm-metrics}
+# Métricas adicionales del modelo lineal
+lm_glance <- broom::glance(lm_model)
+
+lm_metrics <- tibble(
+  Metrica = c("R² ajustado", "AIC", "BIC", "RMSE Train", "RMSE Validation"),
+  Valor = c(
+    lm_glance$adj.r.squared,
+    lm_glance$AIC,
+    lm_glance$BIC,
+    lm_rmse_tbl$rmse[1],
+    lm_rmse_tbl$rmse[2]
+  )
+)
+
+lm_metrics %>%
+  mutate(Valor = round(Valor, 3)) %>%
+  gt::gt() %>%
+  gt::tab_header(title = "Métricas de calidad del modelo lineal")
+```
+
+## 7. Modelo predictivo adicional y selección final
+
+```{r rf-model}
+rf_train <- train_data %>%
+  select(eaux_train_ac, event_duration, suma_ton_compresores, suma_hvac_ton_compresores,
+         suma_hvac_ton_heater, suma_ton_comp_cab, suma_ton_heater_cab, event)
+
+rf_validation <- validation_data %>%
+  select(eaux_train_ac, event_duration, suma_ton_compresores, suma_hvac_ton_compresores,
+         suma_hvac_ton_heater, suma_ton_comp_cab, suma_ton_heater_cab, event) %>%
+  mutate(event = factor(event, levels = levels(rf_train$event)))
+
+set.seed(2025)
+rf_model <- randomForest::randomForest(
+  eaux_train_ac ~ ., data = rf_train, ntree = 50,
+  mtry = floor(sqrt(ncol(rf_train) - 1)), importance = TRUE
+)
+
+rf_train$pred_rf <- predict(rf_model, newdata = rf_train)
+rf_validation$pred_rf <- predict(rf_model, newdata = rf_validation)
+
+rf_rmse_tbl <- tibble(
+  dataset = c("Entrenamiento (1-15 Sep)", "Validacion (16-30 Sep)"),
+  rmse = c(rmse(rf_train$eaux_train_ac, rf_train$pred_rf),
+           rmse(rf_validation$eaux_train_ac, rf_validation$pred_rf))
+)
+
+rf_importance <- randomForest::importance(rf_model) %>%
+  as_tibble(rownames = "variable")
+
+list(
+  rmse = rf_rmse_tbl %>% mutate(rmse = round(rmse, 3)),
+  importancia = rf_importance
+)
+```
+
+```{r rf-rmse-table, echo=FALSE}
+rf_rmse_tbl %>%
+  mutate(rmse = round(rmse, 3)) %>%
+  gt::gt()
+```
+
+```{r rf-importance, fig.cap="Importancia de variables en el modelo Random Forest"}
+rf_importance %>%
+  mutate(variable = forcats::fct_reorder(variable, `%IncMSE`)) %>%
+  ggplot(aes(x = `%IncMSE`, y = variable)) +
+  geom_col(fill = "darkgreen") +
+  labs(x = "% incremento del MSE", y = "Variable")
+```
+
+```{r model-comparison}
+# Comparación directa de ambos modelos
+comparison_table <- bind_rows(
+  lm_rmse_tbl %>% mutate(Modelo = "Regresión Lineal"),
+  rf_rmse_tbl %>% mutate(Modelo = "Random Forest")
+) %>%
+  select(Modelo, dataset, rmse) %>%
+  pivot_wider(names_from = dataset, values_from = rmse) %>%
+  mutate(
+    Diferencia = `Validacion (16-30 Sep)` - `Entrenamiento (1-15 Sep)`,
+    `% Sobreajuste` = (Diferencia / `Entrenamiento (1-15 Sep)`) * 100
+  )
+
+comparison_table %>%
+  mutate(across(where(is.numeric), ~round(., 3))) %>%
+  gt::gt() %>%
+  gt::tab_header(title = "Comparación de modelos: Lineal vs Random Forest") %>%
+  gt::tab_spanner(
+    label = "RMSE (kWh)",
+    columns = c(`Entrenamiento (1-15 Sep)`, `Validacion (16-30 Sep)`)
+  )
+```
+
+```{r prediction-scatter}
+# Gráfico de valores observados vs predichos para el modelo Random Forest
+rf_validation %>%
+  ggplot(aes(x = eaux_train_ac, y = pred_rf)) +
+  geom_point(alpha = 0.5, color = "darkgreen") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    x = "Consumo observado (kWh)",
+    y = "Consumo predicho (kWh)",
+    title = "Random Forest: Predicciones vs Valores Reales (Validación)"
+  ) +
+  theme_minimal()
+```
+
+## 8. Conclusiones y recomendaciones
+
+### 8.1. Contraste de consumos y potencias por tipo de evento
+
+Basándose en las pruebas t de Student realizadas:
+
+- Los eventos tipo **"interstation"** y **"stop"** presentan diferencias estadísticas en sus consumos y potencias medias.
+- Esta diferenciación es crucial para la modelización, ya que el comportamiento energético varía según el tipo de operación del tren.
+- Incluir el tipo de evento como variable categórica en los modelos es fundamental para capturar esta heterogeneidad.
+
+### 8.2. Calidad del modelo lineal
+
+**Modelo de regresión lineal múltiple:**
+
+- **Variables significativas**: Las variables con p-valor < 0.05 tienen un efecto estadísticamente significativo sobre el consumo.
+- **Interpretabilidad**: Los coeficientes del modelo lineal son directamente interpretables:
+  - Cada coeficiente representa el cambio en el consumo (kWh) por unidad de cambio en la variable predictora, manteniendo las demás constantes.
+  - Los coeficientes de los eventos categóricos indican el efecto diferencial respecto a la categoría de referencia.
+  
+- **Diagnóstico de residuos**: 
+  - La distribución de residuos debe aproximarse a una normal con media cero.
+  - El gráfico de residuos vs valores ajustados permite detectar patrones no lineales o heterocedasticidad.
+  
+- **R² ajustado**: Indica el porcentaje de variabilidad del consumo explicado por el modelo (revisar el summary del modelo).
+
+### 8.3. Comparativa de desempeño: Modelo Lineal vs Random Forest
+
+**Métricas RMSE (Root Mean Squared Error):**
+
+Comparar los valores de RMSE en entrenamiento y validación para ambos modelos:
+
+- **RMSE más bajo** = Mejor capacidad predictiva
+- **Diferencia entre RMSE de entrenamiento y validación** = Indicador de sobreajuste
+  - Si el Random Forest tiene RMSE muy bajo en entrenamiento pero alto en validación, hay sobreajuste
+  - El modelo lineal generalmente presenta menor diferencia (mayor generalización)
+
+**Random Forest:**
+- **Ventajas**: Mayor capacidad para capturar relaciones no lineales y interacciones complejas entre variables
+- **Desventajas**: Menor interpretabilidad (modelo "caja negra"), mayor complejidad computacional
+- **Importancia de variables**: El gráfico de importancia muestra qué variables contribuyen más a las predicciones
+
+### 8.4. Selección del modelo final
+
+**Criterios de selección:**
+
+1. **Si el RMSE del Random Forest es significativamente menor** (>10% de mejora) y la diferencia entre entrenamiento y validación es moderada:
+   - **Recomendación**: Random Forest para aplicaciones donde la precisión predictiva es prioritaria
+   
+2. **Si ambos modelos tienen RMSE similares** (diferencia <5%):
+   - **Recomendación**: Modelo lineal por su mayor interpretabilidad y simplicidad
+   - Facilita la comprensión del negocio y la toma de decisiones basada en datos
+   - Menor riesgo de sobreajuste y mayor facilidad de mantenimiento
+
+3. **Equilibrio interpretabilidad vs desempeño**:
+   - Para sistemas de monitorización y alarmas: preferir interpretabilidad (modelo lineal)
+   - Para optimización y predicción precisa: preferir desempeño (Random Forest si es claramente superior)
+
+### 8.5. Próximos pasos y mejoras potenciales
+
+**Análisis adicionales recomendados:**
+
+1. **Estratificación por tipo de evento**:
+   - Construir modelos separados para cada tipo de evento (interstation, stop)
+   - Puede mejorar la precisión si los patrones son muy diferentes
+
+2. **Ingeniería de características**:
+   - Crear variables derivadas (ratios, diferencias, promedios móviles)
+   - Interacciones entre variables (ej: event_duration * tipo_evento)
+
+3. **Validación temporal**:
+   - Evaluar el modelo con datos de octubre o meses posteriores
+   - Verificar estabilidad del modelo a lo largo del tiempo
+
+4. **Análisis de autocorrelación**:
+   - Verificar si eventos consecutivos presentan correlación temporal
+   - Considerar modelos de series temporales si hay autocorrelación significativa
+
+5. **Detección de outliers y casos atípicos**:
+   - Investigar eventos con residuos muy elevados
+   - Pueden indicar condiciones anómalas o errores de medición
+
+6. **Modelos híbridos**:
+   - Combinar la interpretabilidad del modelo lineal con la precisión del Random Forest
+   - Usar el modelo lineal como baseline y el Random Forest para casos complejos
+
+### 8.6. Recomendaciones para el despliegue
+
+1. **Monitorización continua**: Implementar seguimiento del error de predicción en producción
+2. **Reentrenamiento periódico**: Actualizar modelos con datos nuevos (mensual o trimestral)
+3. **Documentación**: Mantener registro de versiones del modelo y sus métricas de desempeño
+4. **Validación cruzada**: Considerar k-fold cross-validation para una evaluación más robusta
+5. **Intervalo de confianza**: Proporcionar intervalos de predicción, no solo puntuales
