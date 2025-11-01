@@ -97,10 +97,10 @@ df_raw %>%
 | `ut` | Identificador de la unidad de tren | Categórica |
 | `event_duration` | Duración del evento | Segundos |
 | `suma_ton_compresores` | Suma de toneladas de refrigeración de compresores | Toneladas |
-| `suma_hvac_ton_compresores` | Suma de toneladas HVAC de compresores | Toneladas |
-| `suma_hvac_ton_heater` | Suma de toneladas HVAC de calefacción | Toneladas |
-| `suma_ton_comp_cab` | Suma de toneladas de compresores en cabina | Toneladas |
-| `suma_ton_heater_cab` | Suma de toneladas de calefacción en cabina | Toneladas |
+| `suma_hvac_ton_compresores` | Suma de toneladas HVAC de compresores | Tiempo encendido |
+| `suma_hvac_ton_heater` | Suma de ton HVAC de calefacción | Tiempo encendido |
+| `suma_ton_comp_cab` | Suma de ton de compresores en cabina | Tiempo encendido |
+| `suma_ton_heater_cab` | Suma de ton de calefacción en cabina | Tiempo encendido |
 | `eaux_train_ac` | Consumo energético de equipos auxiliares | kWh |
 | `potencia_kw` | Potencia media durante el evento (calculada) | kW |
 
