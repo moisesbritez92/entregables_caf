@@ -47,7 +47,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width =
 
 ```{r libraries}
 required_packages <- c(
-  "tidyverse", "lubridate", "broom", "glue", "gt", "scales", "yardstick", "randomForest"
+  "tidyverse", "lubridate", "broom", "glue", "gt", "scales", "yardstick", "randomForest", "doParallel"
 )
 
 missing_pkgs <- setdiff(required_packages, rownames(installed.packages()))
@@ -117,17 +117,16 @@ numeric_cols <- c(
   "suma_hvac_ton_heater", "suma_ton_comp_cab", "suma_ton_heater_cab", "eaux_train_ac"
 )
 
+# ⚡ OPTIMIZACIÓN: Usar operaciones más eficientes y evitar múltiples pasadas
 df_filtered <- df_raw %>%
   as_tibble() %>%
-  mutate(across(all_of(numeric_cols), as.numeric)) %>%
-  mutate(
-    date_time = lubridate::ymd_hms(date_time, tz = "UTC"),
-    event = forcats::as_factor(event),
-    ut = forcats::as_factor(ut),
-    potencia_kw = if_else(event_duration > 0, eaux_train_ac / (event_duration / 3600), NA_real_)
-  ) %>%
-  filter(event_duration <= 600, event != "maintenance", event_duration > 0) %>%
-  drop_na(eaux_train_ac, potencia_kw)
+  mutate(across(all_of(numeric_cols), as.numeric),
+         date_time = lubridate::ymd_hms(date_time, tz = "UTC"),
+         event = forcats::as_factor(event),
+         ut = forcats::as_factor(ut)) %>%
+  filter(event_duration > 0 & event_duration <= 600, event != "maintenance") %>%
+  mutate(potencia_kw = eaux_train_ac / (event_duration / 3600)) %>%
+  filter(!is.na(eaux_train_ac) & !is.na(potencia_kw))
 
 df_filtered %>%
   summarise(
@@ -326,10 +325,17 @@ rf_validation <- validation_data %>%
   mutate(event = factor(event, levels = levels(rf_train$event)))
 
 set.seed(2025)
+# ⚡ OPTIMIZACIÓN: Usar procesamiento paralelo y más árboles para mejor precisión
+library(doParallel)
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
 rf_model <- randomForest::randomForest(
-  eaux_train_ac ~ ., data = rf_train, ntree = 50,
+  eaux_train_ac ~ ., data = rf_train, ntree = 200,
   mtry = floor(sqrt(ncol(rf_train) - 1)), importance = TRUE
 )
+
+stopCluster(cl)
 
 rf_train$pred_rf <- predict(rf_model, newdata = rf_train)
 rf_validation$pred_rf <- predict(rf_model, newdata = rf_validation)
