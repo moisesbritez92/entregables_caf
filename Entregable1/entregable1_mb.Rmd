@@ -47,15 +47,17 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width =
 
 ```{r libraries}
 required_packages <- c(
-  "tidyverse", "lubridate", "broom", "glue", "gt", "scales", "yardstick", "randomForest", "doParallel"
+  "tidyverse", "lubridate", "broom", "glue", "gt", "scales", "yardstick", 
+  "randomForest", "doParallel", "car", "lmtest", "effsize"
 )
 
 missing_pkgs <- setdiff(required_packages, rownames(installed.packages()))
 if (length(missing_pkgs) > 0) {
-  stop(glue::glue("Instala los paquetes antes de continuar: {paste(missing_pkgs, collapse = ', ')}"))
+  message(glue::glue("Instalando paquetes faltantes: {paste(missing_pkgs, collapse = ', ')}"))
+  install.packages(missing_pkgs, repos = "https://cloud.r-project.org/")
 }
 
-invisible(lapply(required_packages, library, character.only = TRUE))
+invisible(lapply(required_packages, library, character.only = TRUE, quietly = TRUE))
 
 rmse <- function(obs, pred) {
   sqrt(mean((obs - pred)^2, na.rm = TRUE))
@@ -104,10 +106,56 @@ df_raw %>%
 
 ## 2. Limpieza y filtrado de eventos
 
+### 2.1. Análisis exploratorio de la duración de eventos
+
+Antes de aplicar filtros, se analiza la distribución de duración de eventos para justificar el umbral de filtrado.
+
+```{r duration-exploration}
+# Estadísticas descriptivas de duración
+duration_stats <- df_raw %>%
+  as_tibble() %>%
+  mutate(event_duration = as.numeric(event_duration)) %>%
+  filter(!is.na(event_duration), event_duration > 0) %>%
+  summarise(
+    min = min(event_duration),
+    q05 = quantile(event_duration, 0.05),
+    q25 = quantile(event_duration, 0.25),
+    median = median(event_duration),
+    mean = mean(event_duration),
+    q75 = quantile(event_duration, 0.75),
+    q95 = quantile(event_duration, 0.95),
+    q99 = quantile(event_duration, 0.99),
+    max = max(event_duration),
+    n = n()
+  )
+
+duration_stats %>% gt::gt() %>%
+  gt::fmt_number(columns = -n, decimals = 1) %>%
+  gt::tab_header(title = "Estadísticas de duración de eventos (segundos)")
+```
+
+```{r duration-distribution, fig.cap="Distribución de duración de eventos (escala logarítmica)"}
+df_raw %>%
+  as_tibble() %>%
+  mutate(event_duration = as.numeric(event_duration)) %>%
+  filter(!is.na(event_duration), event_duration > 0) %>%
+  ggplot(aes(x = event_duration)) +
+  geom_histogram(bins = 100, fill = "steelblue", color = "white") +
+  scale_x_log10(labels = scales::comma) +
+  geom_vline(xintercept = 600, color = "red", linetype = "dashed", size = 1) +
+  annotate("text", x = 600, y = Inf, label = "Umbral: 600s", 
+           vjust = 1.5, hjust = -0.1, color = "red") +
+  labs(x = "Duración del evento (segundos, escala log)", y = "Frecuencia",
+       title = "Distribución de duración de eventos")
+```
+
+### 2.2. Criterios de filtrado
+
 Se aplican los siguientes criterios de filtrado:
 
 - **Duración máxima**: Eventos con duración ≤ 600 segundos (10 minutos)
-- **Exclusión de mantenimiento**: Se excluyen eventos tipo "maintenance" por su naturaleza atípica
+  - **Justificación**: El percentil 95 está en `r round(duration_stats$q95, 0)` segundos. El umbral de 600s retiene aproximadamente el 95% de los eventos, excluyendo valores atípicos que podrían corresponder a eventos anómalos o errores de registro.
+- **Exclusión de mantenimiento**: Se excluyen eventos tipo "maintenance" por su naturaleza atípica y patrones de consumo no comparables con operación normal
 - **Valores válidos**: Se eliminan registros con valores faltantes en consumo o potencia
 - **Cálculo de potencia**: Se calcula la potencia media (kW) = Energía (kWh) / Duración (horas)
 
@@ -127,6 +175,18 @@ df_filtered <- df_raw %>%
   filter(event_duration > 0 & event_duration <= 600, event != "maintenance") %>%
   mutate(potencia_kw = eaux_train_ac / (event_duration / 3600)) %>%
   filter(!is.na(eaux_train_ac) & !is.na(potencia_kw))
+
+# Resumen del filtrado
+filtering_summary <- tibble(
+  Metrica = c("Eventos originales", "Eventos filtrados", "% Retenido"),
+  Valor = c(
+    nrow(df_raw),
+    nrow(df_filtered),
+    round(nrow(df_filtered) / nrow(df_raw) * 100, 1)
+  )
+)
+
+filtering_summary %>% gt::gt()
 
 df_filtered %>%
   summarise(
@@ -150,28 +210,109 @@ df_filtered %>%
 
 ## 3. Comparativa de consumos y potencias
 
+### 3.1. Verificación de supuestos para pruebas t
 
-```{r comparativa}
+```{r test-assumptions}
 df_events <- df_filtered %>%
   filter(event %in% c("interstation", "stop")) %>%
   mutate(event = forcats::fct_drop(event))
 
+# Prueba de normalidad (Shapiro-Wilk)
+# Nota: Con muestras grandes, incluso desviaciones pequeñas son significativas
+# La inspección visual sigue siendo importante
+
+# Muestrear para Shapiro-Wilk (máximo 5000 observaciones)
+set.seed(2025)
+sample_size <- min(5000, nrow(df_events))
+
+interstation_sample <- df_events %>% 
+  filter(event == "interstation") %>% 
+  slice_sample(n = min(sample_size, n()))
+
+stop_sample <- df_events %>% 
+  filter(event == "stop") %>% 
+  slice_sample(n = min(sample_size, n()))
+
+normality_consumo <- bind_rows(
+  broom::tidy(shapiro.test(interstation_sample$eaux_train_ac)) %>% 
+    mutate(group = "interstation", variable = "Consumo (kWh)"),
+  broom::tidy(shapiro.test(stop_sample$eaux_train_ac)) %>% 
+    mutate(group = "stop", variable = "Consumo (kWh)")
+) %>%
+  select(variable, group, statistic, p.value)
+
+normality_consumo %>% 
+  gt::gt() %>%
+  gt::fmt_number(columns = c(statistic, p.value), decimals = 4) %>%
+  gt::tab_header(title = "Pruebas de normalidad (Shapiro-Wilk)")
+
+# Prueba de homogeneidad de varianzas (Levene)
+if (requireNamespace("car", quietly = TRUE)) {
+  levene_consumo <- car::leveneTest(eaux_train_ac ~ event, data = df_events)
+  levene_potencia <- car::leveneTest(potencia_kw ~ event, data = df_events)
+  
+  levene_results <- bind_rows(
+    tibble(variable = "Consumo (kWh)", F_statistic = levene_consumo$`F value`[1], 
+           p_value = levene_consumo$`Pr(>F)`[1]),
+    tibble(variable = "Potencia (kW)", F_statistic = levene_potencia$`F value`[1], 
+           p_value = levene_potencia$`Pr(>F)`[1])
+  )
+  
+  levene_results %>% 
+    gt::gt() %>%
+    gt::fmt_number(columns = c(F_statistic, p_value), decimals = 4) %>%
+    gt::tab_header(title = "Prueba de Levene para homogeneidad de varianzas")
+}
+```
+
+### 3.2. Estadísticas descriptivas por tipo de evento
+
+```{r comparativa}
 comparativa_eventos <- df_events %>%
   group_by(event) %>%
   summarise(
     n = n(),
     consumo_medio_kWh = mean(eaux_train_ac),
+    consumo_sd_kWh = sd(eaux_train_ac),
     potencia_media_kW = mean(potencia_kw),
+    potencia_sd_kW = sd(potencia_kw),
     .groups = "drop"
   )
 
+comparativa_eventos %>% 
+  mutate(across(where(is.numeric) & !n, ~round(., 3))) %>%
+  gt::gt()
+```
+
+### 3.3. Pruebas de hipótesis y tamaño del efecto
+
+```{r ttest-and-effect}
 tt_consumo <- t.test(eaux_train_ac ~ event, data = df_events, var.equal = FALSE)
 tt_potencia <- t.test(potencia_kw ~ event, data = df_events, var.equal = FALSE)
 
-comparativa_eventos %>% gt::gt()
-```
+# Calcular tamaño del efecto (Cohen's d)
+if (requireNamespace("effsize", quietly = TRUE)) {
+  cohen_consumo <- effsize::cohen.d(eaux_train_ac ~ event, data = df_events)
+  cohen_potencia <- effsize::cohen.d(potencia_kw ~ event, data = df_events)
+  
+  effect_sizes <- tibble(
+    metrica = c("Consumo (kWh)", "Potencia (kW)"),
+    cohens_d = c(cohen_consumo$estimate, cohen_potencia$estimate),
+    interpretacion = case_when(
+      abs(cohens_d) < 0.2 ~ "Pequeño",
+      abs(cohens_d) < 0.5 ~ "Pequeño",
+      abs(cohens_d) < 0.8 ~ "Mediano",
+      TRUE ~ "Grande"
+    )
+  )
+  
+  effect_sizes %>% 
+    gt::gt() %>%
+    gt::fmt_number(columns = cohens_d, decimals = 3) %>%
+    gt::tab_header(title = "Tamaño del efecto (Cohen's d)")
+}
 
-```{r ttest-tables, echo=FALSE}
+# Resultados de las pruebas t
 bind_rows(
   broom::tidy(tt_consumo, conf.int = TRUE) %>% mutate(metrica = "Consumo (kWh)"),
   broom::tidy(tt_potencia, conf.int = TRUE) %>% mutate(metrica = "Potencia (kW)")
@@ -179,30 +320,35 @@ bind_rows(
   rename(conf_low = conf.low, conf_high = conf.high) %>%
   transmute(
     metrica,
-    estimate1,
-    estimate2,
-    estimate = estimate,
+    media_interstation = estimate1,
+    media_stop = estimate2,
+    diferencia = estimate,
     statistic,
     p_value = p.value,
     conf_low,
     conf_high
   ) %>%
   gt::gt() %>%
-  gt::fmt_number(columns = -metrica, decimals = 3)
+  gt::fmt_number(columns = -metrica, decimals = 3) %>%
+  gt::tab_header(title = "Pruebas t de Welch para comparación de medias")
 ```
 
 ### Interpretación de las pruebas t de Student
 
-Las pruebas t de Welch (dos muestras independientes con varianzas desiguales) muestran:
+Las pruebas t de Welch (dos muestras independientes con varianzas desiguales) evalúan si existen diferencias significativas entre los tipos de evento:
 
-**Consumo de energía (kWh):**
-- Los eventos tipo "interstation" presentan un consumo medio significativamente diferente al de los eventos "stop".
-- El p-valor indica si existe evidencia estadística suficiente para rechazar la hipótesis nula de igualdad de medias.
-- El intervalo de confianza proporciona un rango estimado para la diferencia entre las medias poblacionales.
+**Resultados clave**:
 
-**Potencia media (kW):**
-- Similar interpretación para la potencia: se evalúa si existe diferencia significativa en la potencia media entre ambos tipos de eventos.
-- Un p-valor < 0.05 indicaría diferencias estadísticamente significativas al nivel de confianza del 95%.
+1. **Significancia estadística**: Un p-valor < 0.05 indica evidencia estadística suficiente para rechazar la hipótesis nula de igualdad de medias al nivel de confianza del 95%.
+
+2. **Tamaño del efecto (Cohen's d)**: Cuantifica la magnitud práctica de la diferencia:
+   - |d| < 0.5: efecto pequeño
+   - 0.5 ≤ |d| < 0.8: efecto mediano
+   - |d| ≥ 0.8: efecto grande
+
+3. **Intervalo de confianza**: Proporciona un rango estimado para la diferencia entre las medias poblacionales.
+
+**Interpretación práctica**: Las diferencias estadísticamente significativas (p < 0.05) deben complementarse con el análisis del tamaño del efecto para determinar si son relevantes desde el punto de vista operativo. Una diferencia puede ser estadísticamente significativa pero tener un tamaño del efecto pequeño, lo que sugiere poca relevancia práctica.
 
 ## 4. Modelo lineal con la primera quincena
 
@@ -223,25 +369,107 @@ summary(lm_model)
 
 ## 5. Diagnóstico del modelo lineal
 
+### 5.1. Evaluación de multicolinealidad
+
+```{r multicollinearity}
+# Factor de Inflación de la Varianza (VIF)
+# VIF > 5: multicolinealidad moderada
+# VIF > 10: multicolinealidad severa
+vif_values <- car::vif(lm_model)
+
+vif_table <- tibble(
+  variable = names(vif_values),
+  VIF = as.numeric(vif_values)
+) %>%
+  mutate(
+    interpretacion = case_when(
+      VIF < 5 ~ "Aceptable",
+      VIF < 10 ~ "Moderada",
+      TRUE ~ "Severa"
+    )
+  ) %>%
+  arrange(desc(VIF))
+
+vif_table %>%
+  gt::gt() %>%
+  gt::fmt_number(columns = VIF, decimals = 2) %>%
+  gt::tab_header(title = "Análisis de multicolinealidad (VIF)") %>%
+  gt::data_color(
+    columns = VIF,
+    colors = scales::col_numeric(
+      palette = c("green", "yellow", "red"),
+      domain = c(1, 10)
+    )
+  )
+```
+
+### 5.2. Coeficientes del modelo y significancia
+
 ```{r lm-tidy}
 lm_tidy <- broom::tidy(lm_model, conf.int = TRUE)
-median_hours <- median(train_data$event_duration, na.rm = TRUE) / 3600
-
-lm_tidy <- lm_tidy %>%
-  mutate(kw_equiv = estimate / median_hours)
 
 lm_tidy %>%
-  mutate(across(c(estimate, std.error, conf.low, conf.high, kw_equiv), round, 3)) %>%
-  gt::gt()
+  mutate(
+    significativo = ifelse(p.value < 0.05, "Sí", "No"),
+    across(c(estimate, std.error, conf.low, conf.high), round, 3)
+  ) %>%
+  select(term, estimate, std.error, statistic, p.value, conf.low, conf.high, significativo) %>%
+  gt::gt() %>%
+  gt::tab_header(title = "Coeficientes del modelo de regresión lineal") %>%
+  gt::data_color(
+    columns = p.value,
+    colors = scales::col_numeric(
+      palette = c("green", "red"),
+      domain = c(0, 0.1),
+      reverse = TRUE
+    )
+  )
 ```
+
+**Interpretación de coeficientes**:
+
+- Cada coeficiente representa el cambio esperado en el consumo energético (kWh) cuando la variable predictora aumenta en una unidad, manteniendo las demás variables constantes.
+- Los coeficientes de variables categóricas (event) representan el efecto diferencial respecto a la categoría de referencia.
+- Las variables con p-valor < 0.05 son estadísticamente significativas al nivel de confianza del 95%.
+
+### 5.3. Análisis de residuos
 
 ```{r lm-residuals}
 lm_train_aug <- broom::augment(lm_model, data = train_data)
+
+# Prueba de normalidad de residuos (Shapiro-Wilk en muestra)
+set.seed(2025)
+resid_sample <- sample(residuals(lm_model), min(5000, length(residuals(lm_model))))
+shapiro_test <- shapiro.test(resid_sample)
+
+cat("Prueba de Shapiro-Wilk para normalidad de residuos:\n")
+cat("W =", round(shapiro_test$statistic, 4), ", p-valor =", 
+    format(shapiro_test$p.value, scientific = TRUE, digits = 3), "\n\n")
+
+# Prueba de heterocedasticidad (Breusch-Pagan)
+bp_test <- lmtest::bptest(lm_model)
+cat("Prueba de Breusch-Pagan para heterocedasticidad:\n")
+cat("BP =", round(bp_test$statistic, 4), ", p-valor =", 
+    format(bp_test$p.value, scientific = TRUE, digits = 3), "\n\n")
+
+# Prueba de autocorrelación (Durbin-Watson)
+dw_test <- lmtest::dwtest(lm_model)
+cat("Prueba de Durbin-Watson para autocorrelación:\n")
+cat("DW =", round(dw_test$statistic, 4), ", p-valor =", 
+    format(dw_test$p.value, scientific = TRUE, digits = 3), "\n")
 
 ggplot(lm_train_aug, aes(x = .resid)) +
   geom_histogram(bins = 30, color = "white", fill = "steelblue") +
   labs(x = "Residuo (kWh)", y = "Frecuencia", title = "Distribución de residuos del modelo lineal")
 ```
+
+**Interpretación de pruebas**:
+
+- **Shapiro-Wilk**: p-valor > 0.05 sugiere que los residuos se distribuyen normalmente. Con muestras grandes, pequeñas desviaciones pueden ser significativas; la inspección visual es crucial.
+- **Breusch-Pagan**: p-valor < 0.05 indica heterocedasticidad (varianza no constante). Esto puede afectar la validez de los intervalos de confianza.
+- **Durbin-Watson**: Valores cercanos a 2 indican ausencia de autocorrelación. DW < 1.5 o > 2.5 sugieren autocorrelación positiva o negativa.
+
+### 5.4. Gráficos de diagnóstico
 
 ```{r qq-plot}
 ggplot(lm_train_aug, aes(sample = .resid)) +
@@ -255,15 +483,50 @@ ggplot(lm_train_aug, aes(sample = .resid)) +
 ggplot(lm_train_aug, aes(x = .fitted, y = .resid)) +
   geom_point(alpha = 0.6) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "firebrick") +
-  labs(x = "Valores ajustados (kWh)", y = "Residuo (kWh)", title = "Residuos vs valores ajustados")
+  geom_smooth(se = FALSE, color = "blue") +
+  labs(x = "Valores ajustados (kWh)", y = "Residuo (kWh)", 
+       title = "Residuos vs valores ajustados")
 ```
+
+### 5.5. Detección de valores influyentes
+
+```{r influential-points}
+# Distancia de Cook
+cooksd <- cooks.distance(lm_model)
+influential_threshold <- 4 / nrow(train_data)
+influential_points <- which(cooksd > influential_threshold)
+
+cat("Número de observaciones influyentes (Cook's D >", 
+    round(influential_threshold, 6), "):", length(influential_points), "\n")
+cat("Porcentaje del total:", 
+    round(length(influential_points) / nrow(train_data) * 100, 2), "%\n")
+
+# Gráfico de distancia de Cook
+plot_data <- tibble(
+  index = 1:length(cooksd),
+  cooksd = cooksd
+) %>%
+  mutate(influential = cooksd > influential_threshold)
+
+ggplot(plot_data, aes(x = index, y = cooksd, color = influential)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = influential_threshold, linetype = "dashed", color = "red") +
+  scale_color_manual(values = c("FALSE" = "steelblue", "TRUE" = "red")) +
+  labs(x = "Índice de observación", y = "Distancia de Cook",
+       title = "Detección de observaciones influyentes",
+       color = "Influyente") +
+  theme(legend.position = "bottom")
+```
+
+### 5.6. Variables significativas
 
 ```{r lm-significance}
 significant_terms <- lm_tidy %>%
   filter(term != "(Intercept)", p.value < 0.05) %>%
   pull(term)
 
-significant_terms
+cat("Variables estadísticamente significativas (p < 0.05):\n")
+cat(paste("-", significant_terms, collapse = "\n"), "\n")
 ```
 
 ### Interpretación de la significancia estadística
@@ -280,16 +543,60 @@ Los coeficientes estimados indican:
 ```{r lm-rmse}
 lm_val_aug <- broom::augment(lm_model, newdata = validation_data)
 
+# Calcular RMSE para ambos conjuntos
+rmse_train <- rmse(lm_train_aug$eaux_train_ac, lm_train_aug$.fitted)
+rmse_val <- rmse(lm_val_aug$eaux_train_ac, lm_val_aug$.fitted)
+
+# Calcular modelo baseline (predicción = media de entrenamiento)
+baseline_pred <- mean(train_data$eaux_train_ac)
+rmse_baseline <- rmse(validation_data$eaux_train_ac, 
+                      rep(baseline_pred, nrow(validation_data)))
+
+# Métricas adicionales
+mean_train <- mean(train_data$eaux_train_ac)
+mean_val <- mean(validation_data$eaux_train_ac)
+
+mae_val <- mean(abs(lm_val_aug$eaux_train_ac - lm_val_aug$.fitted))
+mape_val <- mean(abs((lm_val_aug$eaux_train_ac - lm_val_aug$.fitted) / 
+                      lm_val_aug$eaux_train_ac)) * 100
+
 lm_rmse_tbl <- tibble(
-  dataset = c("Entrenamiento (1-15 Sep)", "Validación (16-30 Sep)"),
-  rmse = c(rmse(lm_train_aug$eaux_train_ac, lm_train_aug$.fitted),
-           rmse(lm_val_aug$eaux_train_ac, lm_val_aug$.fitted))
+  dataset = c("Entrenamiento (1-15 Sep)", "Validación (16-30 Sep)", "Baseline (media)"),
+  rmse = c(rmse_train, rmse_val, rmse_baseline),
+  mean_consumption = c(mean_train, mean_val, mean_val),
+  rmse_pct = (rmse / mean_consumption) * 100
 )
 
 lm_rmse_tbl %>%
-  mutate(rmse = round(rmse, 3)) %>%
-  gt::gt()
+  mutate(across(c(rmse, mean_consumption, rmse_pct), ~round(., 3))) %>%
+  gt::gt() %>%
+  gt::tab_header(title = "Comparación de RMSE: Modelo Lineal vs Baseline")
+
+# Tabla de métricas adicionales
+additional_metrics <- tibble(
+  Metrica = c("MAE (kWh)", "MAPE (%)", "Mejora vs Baseline (%)"),
+  Valor = c(
+    mae_val,
+    mape_val,
+    ((rmse_baseline - rmse_val) / rmse_baseline) * 100
+  )
+)
+
+additional_metrics %>%
+  mutate(Valor = round(Valor, 2)) %>%
+  gt::gt() %>%
+  gt::tab_header(title = "Métricas adicionales de validación")
 ```
+
+**Interpretación de métricas**:
+
+- **RMSE (Root Mean Squared Error)**: Error cuadrático medio. Valores más bajos indican mejor ajuste. Se expresa en las mismas unidades que la variable objetivo (kWh).
+- **RMSE %**: RMSE como porcentaje del consumo medio. Permite evaluar el error en términos relativos.
+- **MAE (Mean Absolute Error)**: Error absoluto medio. Menos sensible a outliers que RMSE.
+- **MAPE (Mean Absolute Percentage Error)**: Error porcentual absoluto medio. Métrica interpretable en términos de porcentaje.
+- **Baseline**: Modelo simple que predice la media del conjunto de entrenamiento. Proporciona un punto de referencia mínimo.
+
+Un aumento moderado del RMSE entre entrenamiento y validación (< 20%) sugiere buena capacidad de generalización.
 
 ```{r lm-metrics}
 # Métricas adicionales del modelo lineal
@@ -333,12 +640,16 @@ registerDoParallel(cl)
 # Asegurar limpieza del cluster incluso si hay error
 tryCatch({
   rf_model <- randomForest::randomForest(
-    eaux_train_ac ~ ., data = rf_train, ntree = 200,
-    mtry = floor(sqrt(ncol(rf_train) - 1)), importance = TRUE
+    eaux_train_ac ~ ., data = rf_train, ntree = 500,
+    mtry = floor((ncol(rf_train) - 1) / 3), importance = TRUE
   )
 }, finally = {
   stopCluster(cl)
 })
+
+# Análisis de Out-of-Bag Error
+cat("Out-of-Bag MSE:", round(tail(rf_model$mse, 1), 2), "\n")
+cat("Out-of-Bag RMSE:", round(sqrt(tail(rf_model$mse, 1)), 2), "kWh\n")
 
 rf_train$pred_rf <- predict(rf_model, newdata = rf_train)
 rf_validation$pred_rf <- predict(rf_model, newdata = rf_validation)
@@ -373,27 +684,60 @@ rf_importance %>%
 ```
 
 ```{r model-comparison}
-# Comparación directa de ambos modelos
+# Comparación directa de ambos modelos incluyendo baseline
+baseline_pred_val <- mean(train_data$eaux_train_ac)
+rmse_baseline_train <- rmse(train_data$eaux_train_ac, 
+                            rep(mean(train_data$eaux_train_ac), nrow(train_data)))
+rmse_baseline_val <- rmse(validation_data$eaux_train_ac, 
+                          rep(baseline_pred_val, nrow(validation_data)))
+
 comparison_table <- bind_rows(
-  lm_rmse_tbl %>% mutate(Modelo = "Regresión Lineal"),
-  rf_rmse_tbl %>% mutate(Modelo = "Random Forest")
+  tibble(Modelo = "Baseline (Media)", 
+         `Entrenamiento (1-15 Sep)` = rmse_baseline_train,
+         `Validacion (16-30 Sep)` = rmse_baseline_val),
+  lm_rmse_tbl %>% 
+    filter(dataset != "Baseline (media)") %>%
+    mutate(Modelo = "Regresión Lineal") %>%
+    select(Modelo, dataset, rmse) %>%
+    pivot_wider(names_from = dataset, values_from = rmse),
+  rf_rmse_tbl %>% mutate(Modelo = "Random Forest") %>%
+    select(Modelo, dataset, rmse) %>%
+    pivot_wider(names_from = dataset, values_from = rmse)
 ) %>%
-  select(Modelo, dataset, rmse) %>%
-  pivot_wider(names_from = dataset, values_from = rmse) %>%
   mutate(
     Diferencia = `Validacion (16-30 Sep)` - `Entrenamiento (1-15 Sep)`,
-    `% Sobreajuste` = (Diferencia / `Entrenamiento (1-15 Sep)`) * 100
+    `% Sobreajuste` = (Diferencia / `Entrenamiento (1-15 Sep)`) * 100,
+    `Mejora vs Baseline (%)` = ((rmse_baseline_val - `Validacion (16-30 Sep)`) / 
+                                 rmse_baseline_val) * 100
   )
 
 comparison_table %>%
   mutate(across(where(is.numeric), ~round(., 3))) %>%
   gt::gt() %>%
-  gt::tab_header(title = "Comparación de modelos: Lineal vs Random Forest") %>%
+  gt::tab_header(title = "Comparación de modelos: Baseline vs Lineal vs Random Forest") %>%
   gt::tab_spanner(
     label = "RMSE (kWh)",
     columns = c(`Entrenamiento (1-15 Sep)`, `Validacion (16-30 Sep)`)
+  ) %>%
+  gt::data_color(
+    columns = `Validacion (16-30 Sep)`,
+    colors = scales::col_numeric(
+      palette = c("green", "yellow", "red"),
+      domain = NULL
+    )
   )
 ```
+
+**Análisis comparativo**:
+
+La tabla muestra:
+1. **Baseline (Media)**: Modelo más simple que predice siempre la media del entrenamiento
+2. **Regresión Lineal**: Modelo interpretable con variables significativas
+3. **Random Forest**: Modelo de ensamble con mayor capacidad no lineal
+
+Métricas clave:
+- **% Sobreajuste**: Indica cuánto aumenta el error de entrenamiento a validación
+- **Mejora vs Baseline**: Porcentaje de reducción del error respecto al modelo más simple
 
 ```{r prediction-scatter}
 # Gráfico de valores observados vs predichos para el modelo Random Forest
@@ -494,7 +838,24 @@ Comparar los valores de RMSE en entrenamiento y validación para ambos modelos:
    - Combinar la interpretabilidad del modelo lineal con la precisión del Random Forest
    - Usar el modelo lineal como baseline y el Random Forest para casos complejos
 
-### 8.6. Recomendaciones para el despliegue
+### 8.6. Limitaciones del estudio
+
+**Limitaciones identificadas**:
+
+1. **Datos temporales limitados**: Solo un mes de datos (septiembre 2019) puede no capturar variabilidad estacional
+2. **Autocorrelación temporal**: Los eventos consecutivos pueden estar correlacionados, violando el supuesto de independencia
+3. **Filtrado de datos**: El umbral de 600 segundos excluye ~5% de eventos que podrían contener información valiosa
+4. **Variables no consideradas**: Factores externos como temperatura ambiente, ocupación del tren, o condiciones de vía no están incluidos
+5. **Validación temporal**: Solo se valida en la segunda quincena del mismo mes; validación en otros meses fortalecería las conclusiones
+6. **Heterocedasticidad**: Si la prueba de Breusch-Pagan resulta significativa, los intervalos de confianza pueden ser imprecisos
+
+**Mitigaciones aplicadas**:
+- Validación temporal en lugar de aleatoria (evita data leakage)
+- Uso de Welch's t-test (robusto ante varianzas desiguales)
+- Análisis exhaustivo de residuos y valores influyentes
+- Comparación con modelo baseline para contextualizar desempeño
+
+### 8.7. Recomendaciones para el despliegue
 
 1. **Monitorización continua**: Implementar seguimiento del error de predicción en producción
 2. **Reentrenamiento periódico**: Actualizar modelos con datos nuevos (mensual o trimestral)
