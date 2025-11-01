@@ -774,15 +774,15 @@ Basándose en las pruebas t de Student realizadas:
   
 - **Diagnóstico de residuos**: 
   - La distribución de residuos debe aproximarse a una normal con media cero.
-  - El gráfico de residuos vs valores ajustados permite detectar patrones no lineales o heterocedasticidad.
+  - El gráfico de residuos vs valores ajustados permitió detectar patrones no lineales o heterocedasticidad.
   
-- **R² ajustado**: Indica el porcentaje de variabilidad del consumo explicado por el modelo (revisar el summary del modelo).
+- **R² ajustado**: Indica el porcentaje de variabilidad del consumo explicado por el modelo.
 
 ### 8.3. Comparativa de desempeño: Modelo Lineal vs Random Forest
 
 **Métricas RMSE (Root Mean Squared Error):**
 
-Comparar los valores de RMSE en entrenamiento y validación para ambos modelos:
+Compara los valores de RMSE en entrenamiento y validación para ambos modelos:
 
 - **RMSE más bajo** = Mejor capacidad predictiva
 - **Diferencia entre RMSE de entrenamiento y validación** = Indicador de sobreajuste
@@ -796,19 +796,30 @@ Comparar los valores de RMSE en entrenamiento y validación para ambos modelos:
 
 ### 8.4. Selección del modelo final
 
-**Criterios de selección:**
+**Análisis:**
 
-1. **Si el RMSE del Random Forest es significativamente menor** (>10% de mejora) y la diferencia entre entrenamiento y validación es moderada:
-   - **Recomendación**: Random Forest para aplicaciones donde la precisión predictiva es prioritaria
-   
-2. **Si ambos modelos tienen RMSE similares** (diferencia <5%):
-   - **Recomendación**: Modelo lineal por su mayor interpretabilidad y simplicidad
-   - Facilita la comprensión del negocio y la toma de decisiones basada en datos
-   - Menor riesgo de sobreajuste y mayor facilidad de mantenimiento
+* El **modelo Random Forest** obtuvo el **menor RMSE** en validación (0.076 kWh), con una **mejora del 89.8 % respecto al modelo base**.
+* La **diferencia entre entrenamiento y validación (0.019 kWh)** indica **cierto sobreajuste**, aunque dentro de un rango aceptable (<35 %).
+* El **modelo lineal**, aunque más simple, mantiene una buena capacidad de generalización y menor riesgo de sobreajuste, pero no alcanza la misma precisión que el Random Forest.
 
-3. **Equilibrio interpretabilidad vs desempeño**:
-   - Para sistemas de monitorización y alarmas: preferir interpretabilidad (modelo lineal)
-   - Para optimización y predicción precisa: preferir desempeño (Random Forest si es claramente superior)
+**Conclusiones parciales:**
+
+* El **Random Forest** presenta **mejor capacidad predictiva** al capturar relaciones **no lineales** y **complejas interacciones** entre variables.
+* Sin embargo, su **interpretabilidad** es limitada, y el **costo computacional** es mayor que en la regresión lineal.
+* El modelo lineal sigue siendo valioso en entornos donde la **simplicidad** y la **explicabilidad** son prioritarias.
+
+
+**Criterios considerados:**
+
+1. **Desempeño predictivo (RMSE)**
+2. **Grado de sobreajuste**
+3. **Interpretabilidad y aplicabilidad práctica**
+
+**Conclusión final:**
+
+* Dado que el **Random Forest mejora casi un 90 % el error respecto al modelo base** y su **sobreajuste se mantiene moderado**, se **selecciona como modelo final** para tareas de **predicción de consumo energético**.
+* Se recomienda, no obstante, **mantener el modelo lineal** como alternativa de respaldo para aplicaciones donde se requiera **mayor interpretabilidad** o **inferencias analíticas** (por ejemplo, estimar el impacto de una variable específica sobre el consumo).
+* En futuras iteraciones, podría evaluarse una **regularización adicional o ajuste de hiperparámetros** en el Random Forest para reducir la brecha entre entrenamiento y validación.
 
 ### 8.5. Próximos pasos y mejoras potenciales
 
