@@ -472,21 +472,43 @@ ap_results <- data.frame(
 cat("RESULTADOS: Average Precision por Clase\n")
 print(ap_results)
 
-# Tabla formateada con kable
+cat("\n")
+
+# Tabla formateada con knitr::kable si está disponible
 if (requireNamespace("knitr", quietly = TRUE)) {
-  print(knitr::kable(ap_results, caption = "AP por clase (Train vs Validation)"))
+  cat("Tabla formateada con knitr::kable:\n\n")
+  print(knitr::kable(ap_results, 
+                     caption = "AP por clase (Train vs Validation)",
+                     format = "simple",
+                     align = c('c', 'c', 'c', 'c')))
+  cat("\n")
 }
 
-# Resumen para describir el gráfico de barras AP por clase (consola)
+# Descripción detallada del gráfico de barras AP por clase (consola)
+cat("\nDESCRIPCIÓN DEL GRÁFICO DE BARRAS AP POR CLASE:\n")
+cat("=" %>% rep(60) %>% paste0(collapse = ""), "\n\n")
+
+# Top-2 AP en Validation
 ap_desc <- ap_results %>%
   arrange(desc(AP_Validation))
-cat("\nDESCRIPCIÓN DEL GRÁFICO AP POR CLASE (CONSOLA):\n")
-cat("  • Top-2 AP en Validation:\n")
-print(head(ap_desc[, c("Clase", "AP_Validation")], 2))
-cat("  • Bottom-2 AP en Validation:\n")
-print(tail(ap_desc[, c("Clase", "AP_Validation")], 2))
-cat("  • Mayor caída (Train - Val):\n")
-print(head(ap_results %>% arrange(desc(Diferencia)) %>% select(Clase, Diferencia), 2))
+cat("Top-2 clases con mayor AP en Validation:\n")
+cat("  1. Clase", ap_desc$Clase[1], "-> AP =", ap_desc$AP_Validation[1], "\n")
+cat("  2. Clase", ap_desc$Clase[2], "-> AP =", ap_desc$AP_Validation[2], "\n\n")
+
+# Bottom-2 AP en Validation
+cat("Bottom-2 clases con menor AP en Validation:\n")
+n_rows <- nrow(ap_desc)
+cat("  1. Clase", ap_desc$Clase[n_rows], "-> AP =", ap_desc$AP_Validation[n_rows], "\n")
+cat("  2. Clase", ap_desc$Clase[n_rows-1], "-> AP =", ap_desc$AP_Validation[n_rows-1], "\n\n")
+
+# Dos mayores caídas Train-Validation
+ap_drops <- ap_results %>% 
+  arrange(desc(Diferencia))
+cat("Dos mayores caídas de AP (Train - Validation):\n")
+cat("  1. Clase", ap_drops$Clase[1], "-> Caída =", ap_drops$Diferencia[1], 
+    "(Train:", ap_drops$AP_Train[1], "-> Val:", ap_drops$AP_Validation[1], ")\n")
+cat("  2. Clase", ap_drops$Clase[2], "-> Caída =", ap_drops$Diferencia[2],
+    "(Train:", ap_drops$AP_Train[2], "-> Val:", ap_drops$AP_Validation[2], ")\n")
 
 cat("\n" %>% rep(2) %>% paste0(collapse = ""))
 
@@ -848,10 +870,11 @@ pr_train <- pr.curve(
 cat("\nAP para Persona vs Resto (Training):", round(pr_train$auc.integral, 4), "\n")
 
 # Extraer datos de la curva
+# PRROC devuelve: [Recall, Precision, Threshold]
 pr_data <- data.frame(
-  threshold = pr_train$curve[, 1],
-  recall = pr_train$curve[, 2],
-  precision = pr_train$curve[, 3]
+  recall = pr_train$curve[, 1],
+  precision = pr_train$curve[, 2],
+  threshold = pr_train$curve[, 3]
 )
 
 # Filtrar datos válidos
@@ -953,15 +976,58 @@ print(conf_mat$table)
 # Specificity y FPR en validation
 TN <- as.numeric(conf_mat$table[1,1])
 FP <- as.numeric(conf_mat$table[2,1])
+FN <- as.numeric(conf_mat$table[1,2])
+TP <- as.numeric(conf_mat$table[2,2])
 Specificity <- TN / (TN + FP)
 FPR <- FP / (TN + FP)
-cat("\nMétricas adicionales (Validation) Persona vs Resto:\n")
-cat(sprintf("  • Specificity: %.4f\n", Specificity))
-cat(sprintf("  • FPR: %.4f\n", FPR))
-cat("\nInterpretación:\n")
-cat("  • Specificity mide la capacidad de identificar correctamente los NO-Persona\n")
-cat("  • FPR mide la proporción de falsos positivos entre los negativos reales\n")
-cat("  • FPR + Specificity = 1\n")
+
+cat("\nMétricas adicionales (Validation) - Persona vs Resto:\n")
+cat("=" %>% rep(60) %>% paste0(collapse = ""), "\n")
+cat(sprintf("  • Specificity (Especificidad): %.4f\n", Specificity))
+cat(sprintf("  • FPR (False Positive Rate): %.4f\n", FPR))
+
+cat("\nInterpretación de Métricas:\n")
+cat("-" %>% rep(60) %>% paste0(collapse = ""), "\n")
+cat("  • Specificity (TN/(TN+FP)):\n")
+cat("    - Mide la capacidad del modelo para identificar correctamente los NO-Persona\n")
+cat(sprintf("    - Valor: %.2f%% de los objetos NO-Persona fueron correctamente clasificados\n", 
+            Specificity * 100))
+if (Specificity >= 0.95) {
+  cat("    - Excelente: El modelo tiene muy pocos falsos positivos\n")
+} else if (Specificity >= 0.85) {
+  cat("    - Bueno: El modelo identifica bien la mayoría de NO-Persona\n")
+} else {
+  cat("    - Moderado: Existe un número considerable de falsos positivos\n")
+}
+
+cat("\n  • FPR (FP/(TN+FP)):\n")
+cat("    - Mide la proporción de falsos positivos entre los negativos reales\n")
+cat(sprintf("    - Valor: %.2f%% de los NO-Persona fueron incorrectamente clasificados como Persona\n", 
+            FPR * 100))
+if (FPR <= 0.05) {
+  cat("    - Excelente: Tasa de falsos positivos muy baja\n")
+} else if (FPR <= 0.15) {
+  cat("    - Aceptable: Tasa de falsos positivos razonable\n")
+} else {
+  cat("    - Alta: Muchos NO-Persona clasificados erróneamente como Persona\n")
+}
+
+cat("\n  • Relación:\n")
+cat("    - FPR + Specificity = 1 (verificación:", round(FPR + Specificity, 4), ")\n")
+cat("    - Al priorizar Precision, sacrificamos algo de Recall pero ganamos en Specificity\n")
+
+cat("\nImplicaciones Prácticas:\n")
+cat("-" %>% rep(60) %>% paste0(collapse = ""), "\n")
+if (precision_val >= 0.85 && Specificity >= 0.90) {
+  cat("  • Configuración adecuada para aplicaciones donde las falsas alarmas son costosas\n")
+  cat("  • Baja tasa de falsos positivos (FPR bajo) y alta precisión\n")
+} else if (precision_val >= 0.70 && Specificity >= 0.80) {
+  cat("  • Balance razonable entre detectar personas y evitar falsas alarmas\n")
+  cat("  • Apropiado para aplicaciones con tolerancia moderada a errores\n")
+} else {
+  cat("  • Considerar ajustar el umbral si los falsos positivos son problemáticos\n")
+  cat("  • O aumentar el umbral si se requiere mayor precisión y specificity\n")
+}
 ```
 
 ## 6.4 Comparación Train vs Validation
