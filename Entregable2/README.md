@@ -22,9 +22,15 @@ This directory contains the analytical review and corrected implementation of De
    - Can be used as reference or replacement
    - Ready to knit to HTML/PDF
 
-4. **`Enunciado.md`** - Assignment requirements (Spanish)
-5. **`Entregable2.RData`** - Dataset
-6. **`2025_Entregable2_Clasificador_Multiclase.pdf`** - Original PDF output
+4. **`AGENT_USAGE_GUIDE.md`** - Custom Agent Guide 🤖 **NEW**
+   - How to use the Entregable2 Reviewer custom agent
+   - Step-by-step instructions for preparing R outputs
+   - Get expert review without re-running experiments
+   - See `/.github/agents/entregable2_reviewer.md` for agent details
+
+5. **`Enunciado.md`** - Assignment requirements (Spanish)
+6. **`Entregable2.RData`** - Dataset
+7. **`2025_Entregable2_Clasificador_Multiclase.pdf`** - Original PDF output
 
 ## Key Findings from Review
 
@@ -53,6 +59,35 @@ This directory contains the analytical review and corrected implementation of De
 
 The original implementation is a good general multiclass classification project, but it solves a **different problem** than what was assigned. The corrected version addresses all requirements.
 
+## Using the Custom Reviewer Agent 🤖
+
+We now provide a **specialized custom agent** that can review your R outputs!
+
+### What is it?
+- A senior data scientist AI specialized in R, statistical inference, and classification metrics
+- Reviews your completed R analysis outputs (no re-running needed)
+- Provides structured feedback on all assignment requirements
+- Located at: `/.github/agents/entregable2_reviewer.md`
+
+### How to use it:
+1. Run your R analysis and capture console outputs
+2. Read `AGENT_USAGE_GUIDE.md` for detailed instructions
+3. Paste your R outputs and request a review
+4. Get comprehensive feedback covering:
+   - Executive findings
+   - Detailed review of 7 key areas
+   - Direct answers to assignment questions
+   - Actionable recommendations
+   - List of missing items
+
+### When to use it:
+- ✅ After completing your analysis (for verification)
+- ✅ Before final submission (quality check)
+- ✅ To identify gaps or issues in your methodology
+- ✅ To get expert interpretation of your results
+
+See **`AGENT_USAGE_GUIDE.md`** for complete instructions!
+
 ## Recommendations
 
 ### For Reviewers/Graders
@@ -60,6 +95,7 @@ The original implementation is a good general multiclass classification project,
 1. **Read `ANALYTICAL_REVIEW.md` first** - Provides complete context
 2. **Compare original vs corrected** - See what was missing
 3. **Focus on methodology** - Not just code quality
+4. **Try the custom agent** - Get automated review of R outputs
 
 ### For the Author
 
