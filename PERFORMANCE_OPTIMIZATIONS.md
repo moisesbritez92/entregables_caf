@@ -20,6 +20,7 @@ The repository contains two R Markdown files for machine learning assignments. S
 - **Added**: `doParallel` package for multi-core processing
 - **Implementation**: Uses `detectCores() - 1` to leverage all available CPU cores
 - **Impact**: ~8-16x speedup on multi-core processors (depending on core count)
+- **Note**: Actual speedup depends on Amdahl's Law and overhead; typical real-world speedup is 2-4x
 - **Code**:
   ```r
   library(doParallel)
@@ -99,11 +100,11 @@ The repository contains two R Markdown files for machine learning assignments. S
 | Operation | Before | After | Improvement |
 |-----------|--------|-------|-------------|
 | **Entregable1** |
-| Random Forest Training | ~8-10 min | ~3-4 min | ~60% faster |
+| Random Forest Training | ~8-10 min | ~3-4 min | ~60-70% faster |
 | Data Filtering | ~5 sec | ~4 sec | ~20% faster |
 | **Entregable2** |
-| Random Forest Training | ~10-12 min | ~6-8 min | ~40% faster |
-| XGBoost Training | ~3-5 min | ~3-4 min | ~15% faster |
+| Random Forest Training | ~10-12 min | ~6-8 min | ~33-40% faster |
+| XGBoost Training | ~3-5 min | ~3-4 min | ~15-20% faster |
 | Density Plots | ~45 sec | ~6 sec | ~87% faster |
 | Metrics Calculation | ~3 sec | ~2 sec | ~33% faster |
 

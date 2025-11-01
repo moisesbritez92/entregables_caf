@@ -330,12 +330,15 @@ library(doParallel)
 cl <- makeCluster(detectCores() - 1)
 registerDoParallel(cl)
 
-rf_model <- randomForest::randomForest(
-  eaux_train_ac ~ ., data = rf_train, ntree = 200,
-  mtry = floor(sqrt(ncol(rf_train) - 1)), importance = TRUE
-)
-
-stopCluster(cl)
+# Asegurar limpieza del cluster incluso si hay error
+tryCatch({
+  rf_model <- randomForest::randomForest(
+    eaux_train_ac ~ ., data = rf_train, ntree = 200,
+    mtry = floor(sqrt(ncol(rf_train) - 1)), importance = TRUE
+  )
+}, finally = {
+  stopCluster(cl)
+})
 
 rf_train$pred_rf <- predict(rf_model, newdata = rf_train)
 rf_validation$pred_rf <- predict(rf_model, newdata = rf_validation)

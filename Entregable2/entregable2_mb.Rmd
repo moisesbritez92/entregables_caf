@@ -12,6 +12,9 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# ⚡ CONFIGURACIÓN: Tamaño máximo de muestra para visualizaciones
+VISUALIZATION_SAMPLE_SIZE <- 50000
 ```
 
 # 1. Introducción
@@ -157,7 +160,7 @@ for(col in colnames(X)) {
 # ⚡ OPTIMIZACIÓN: Usar muestra para visualización si el dataset es muy grande
 # Densidades son computacionalmente costosas con 400k observaciones
 set.seed(123)
-sample_size <- min(50000, nrow(df_plot))  # Limitar a 50k para visualización
+sample_size <- min(VISUALIZATION_SAMPLE_SIZE, nrow(df_plot))
 if(nrow(df_plot) > sample_size) {
   cat("📊 Usando muestra de", sample_size, "observaciones para visualización (de", nrow(df_plot), ")\n")
   df_plot_sample <- df_plot[sample(nrow(df_plot), sample_size), ]
@@ -286,20 +289,23 @@ train_df$clase <- y_train
 cat("🚀 Entrenando Random Forest con", detectCores() - 1, "cores...\n")
 start_time <- Sys.time()
 
-rf_model <- randomForest(
-  clase ~ .,
-  data = train_df,
-  ntree = 200,  # Aumentado de 100 a 200 para mejor precisión
-  mtry = 3,
-  classwt = class_weights[levels(y_train)],
-  importance = TRUE
-)
+# Asegurar limpieza del cluster incluso si hay error
+tryCatch({
+  rf_model <- randomForest(
+    clase ~ .,
+    data = train_df,
+    ntree = 200,  # Aumentado de 100 a 200 para mejor precisión
+    mtry = 3,
+    classwt = class_weights[levels(y_train)],
+    importance = TRUE
+  )
+}, finally = {
+  stopCluster(cl)
+})
 
 end_time <- Sys.time()
 cat("⏱️ Tiempo de entrenamiento:", 
     round(difftime(end_time, start_time, units = "mins"), 2), "minutos\n")
-
-stopCluster(cl)
 
 print(rf_model)
 
