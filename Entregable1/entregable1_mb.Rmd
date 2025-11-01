@@ -223,15 +223,15 @@ df_events <- df_filtered %>%
 
 # Muestrear para Shapiro-Wilk (máximo 5000 observaciones)
 set.seed(2025)
-sample_size <- min(5000, nrow(df_events))
+sample_size <- 5000
 
 interstation_sample <- df_events %>% 
   filter(event == "interstation") %>% 
-  slice_sample(n = min(sample_size, n()))
+  slice_sample(n = min(sample_size, nrow(.)))
 
 stop_sample <- df_events %>% 
   filter(event == "stop") %>% 
-  slice_sample(n = min(sample_size, n()))
+  slice_sample(n = min(sample_size, nrow(.)))
 
 normality_consumo <- bind_rows(
   broom::tidy(shapiro.test(interstation_sample$eaux_train_ac)) %>% 

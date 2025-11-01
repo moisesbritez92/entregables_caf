@@ -37,7 +37,6 @@ Este entregable ha sido **significativamente mejorado** con:
 - ✅ `mtry` apropiado para regresión
 - ✅ Análisis de error OOB
 
-### 📈 Calidad del Análisis
 **Antes:** 3.3/5  
 **Después:** 4.6/5 (+1.3 puntos)
 
