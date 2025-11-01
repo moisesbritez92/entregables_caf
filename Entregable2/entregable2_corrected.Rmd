@@ -472,6 +472,22 @@ ap_results <- data.frame(
 cat("RESULTADOS: Average Precision por Clase\n")
 print(ap_results)
 
+# Tabla formateada con kable
+if (requireNamespace("knitr", quietly = TRUE)) {
+  print(knitr::kable(ap_results, caption = "AP por clase (Train vs Validation)"))
+}
+
+# Resumen para describir el gráfico de barras AP por clase (consola)
+ap_desc <- ap_results %>%
+  arrange(desc(AP_Validation))
+cat("\nDESCRIPCIÓN DEL GRÁFICO AP POR CLASE (CONSOLA):\n")
+cat("  • Top-2 AP en Validation:\n")
+print(head(ap_desc[, c("Clase", "AP_Validation")], 2))
+cat("  • Bottom-2 AP en Validation:\n")
+print(tail(ap_desc[, c("Clase", "AP_Validation")], 2))
+cat("  • Mayor caída (Train - Val):\n")
+print(head(ap_results %>% arrange(desc(Diferencia)) %>% select(Clase, Diferencia), 2))
+
 cat("\n" %>% rep(2) %>% paste0(collapse = ""))
 
 cat("\n -- MEAN AVERAGE PRECISION (mAP) -- \n")
@@ -648,6 +664,84 @@ ggplot(ap_by_azimuth, aes(x = azimuth_bin, y = ap, color = factor(clase), group 
   theme_minimal() +
   theme(legend.position = "right",
         plot.title = element_text(face = "bold"))
+```
+
+## 5.2.1 Análisis Detallado: Clases 1 y 7 por Distancia
+
+```{r ap_distancia_clases_1_7, fig.width=12, fig.height=6}
+# Gráficos adicionales para clases 1 y 7 por distancia
+ap_by_range_17 <- ap_by_range %>% filter(clase %in% c(1, 7))
+if (nrow(ap_by_range_17) > 0) {
+  ggplot(ap_by_range_17, aes(x = range_bin, y = ap, color = factor(clase), group = clase)) +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 3) +
+    scale_color_manual(values = c("1" = "#E41A1C", "7" = "#377EB8"),
+                       name = "Clase",
+                       labels = c("1" = "Vehículo grande (1)", "7" = "Persona (7)")) +
+    labs(title = "AP vs Distancia (Clases 1 y 7)",
+         subtitle = "Análisis específico de las clases más relevantes",
+         x = "Rango de Distancia (m)", 
+         y = "AP") +
+    theme_minimal() +
+    theme(legend.position = "top",
+          plot.title = element_text(face = "bold"))
+  
+  # Descripción por consola del gráfico
+  desc_range <- ap_by_range_17 %>% group_by(clase) %>%
+    summarise(mejor_bin = range_bin[which.max(ap)], 
+              ap_mejor = max(ap, na.rm=TRUE),
+              peor_bin = range_bin[which.min(ap)], 
+              ap_peor = min(ap, na.rm=TRUE), 
+              .groups = "drop")
+  cat("\nDESCRIPCIÓN AP vs DISTANCIA (CLASES 1 y 7):\n")
+  print(desc_range)
+  cat("\n")
+  for(i in 1:nrow(desc_range)) {
+    cat("Clase", desc_range$clase[i], ":\n")
+    cat("  • Mejor bin:", desc_range$mejor_bin[i], "con AP =", round(desc_range$ap_mejor[i], 4), "\n")
+    cat("  • Peor bin:", desc_range$peor_bin[i], "con AP =", round(desc_range$ap_peor[i], 4), "\n")
+    cat("  • Diferencia entre extremos:", round(desc_range$ap_mejor[i] - desc_range$ap_peor[i], 4), "\n\n")
+  }
+}
+```
+
+## 5.2.2 Análisis Detallado: Clases 1 y 7 por Azimut
+
+```{r ap_azimut_clases_1_7, fig.width=12, fig.height=6}
+# Gráficos adicionales para clases 1 y 7 por azimut
+ap_by_azimuth_17 <- ap_by_azimuth %>% filter(clase %in% c(1, 7))
+if (nrow(ap_by_azimuth_17) > 0) {
+  ggplot(ap_by_azimuth_17, aes(x = azimuth_bin, y = ap, color = factor(clase), group = clase)) +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 3) +
+    scale_color_manual(values = c("1" = "#E41A1C", "7" = "#377EB8"),
+                       name = "Clase",
+                       labels = c("1" = "Vehículo grande (1)", "7" = "Persona (7)")) +
+    labs(title = "AP vs Azimut (Clases 1 y 7)",
+         subtitle = "Análisis específico de las clases más relevantes",
+         x = "|Azimut| (rad)", 
+         y = "AP") +
+    theme_minimal() +
+    theme(legend.position = "top",
+          plot.title = element_text(face = "bold"))
+  
+  # Descripción por consola del gráfico
+  desc_az <- ap_by_azimuth_17 %>% group_by(clase) %>%
+    summarise(mejor_bin = azimuth_bin[which.max(ap)], 
+              ap_mejor = max(ap, na.rm=TRUE),
+              peor_bin = azimuth_bin[which.min(ap)], 
+              ap_peor = min(ap, na.rm=TRUE), 
+              .groups = "drop")
+  cat("\nDESCRIPCIÓN AP vs AZIMUT (CLASES 1 y 7):\n")
+  print(desc_az)
+  cat("\n")
+  for(i in 1:nrow(desc_az)) {
+    cat("Clase", desc_az$clase[i], ":\n")
+    cat("  • Mejor bin:", desc_az$mejor_bin[i], "con AP =", round(desc_az$ap_mejor[i], 4), "\n")
+    cat("  • Peor bin:", desc_az$peor_bin[i], "con AP =", round(desc_az$ap_peor[i], 4), "\n")
+    cat("  • Diferencia entre extremos:", round(desc_az$ap_mejor[i] - desc_az$ap_peor[i], 4), "\n\n")
+  }
+}
 ```
 
 ## 5.3 Interpretación del Análisis Espacial
@@ -855,6 +949,19 @@ cat("   • F1:", round(f1_val, 4), "\n\n")
 
 cat("Matriz de Confusión (Validation):\n")
 print(conf_mat$table)
+
+# Specificity y FPR en validation
+TN <- as.numeric(conf_mat$table[1,1])
+FP <- as.numeric(conf_mat$table[2,1])
+Specificity <- TN / (TN + FP)
+FPR <- FP / (TN + FP)
+cat("\nMétricas adicionales (Validation) Persona vs Resto:\n")
+cat(sprintf("  • Specificity: %.4f\n", Specificity))
+cat(sprintf("  • FPR: %.4f\n", FPR))
+cat("\nInterpretación:\n")
+cat("  • Specificity mide la capacidad de identificar correctamente los NO-Persona\n")
+cat("  • FPR mide la proporción de falsos positivos entre los negativos reales\n")
+cat("  • FPR + Specificity = 1\n")
 ```
 
 ## 6.4 Comparación Train vs Validation
